@@ -12,10 +12,14 @@ mercadopago.configure({
 
 app.post("/crear-preferencia", async (req, res) => {
   try {
-    const { items, payer } = req.body;
+    const { items } = req.body;
     const preference = {
-      items,
-      payer,
+      items: items.map(i => ({
+        title: i.title,
+        quantity: Number(i.quantity),
+        unit_price: Number(i.unit_price),
+        currency_id: "ARS",
+      })),
       back_urls: {
         success: process.env.FRONTEND_URL + "?pago=aprobado",
         failure: process.env.FRONTEND_URL + "?pago=fallido",
@@ -23,13 +27,20 @@ app.post("/crear-preferencia", async (req, res) => {
       },
       auto_return: "approved",
       statement_descriptor: "DIAMANTINA",
-      expires: false,
+      binary_mode: false,
+      payment_methods: {
+        excluded_payment_types: [],
+        installments: 12,
+      },
     };
     const response = await mercadopago.preferences.create(preference);
-    res.json({ id: response.body.id, init_point: response.body.init_point });
+    res.json({
+      id: response.body.id,
+      init_point: response.body.init_point,
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error(JSON.stringify(err, null, 2));
+    res.status(500).json({ error: err.message, detail: err });
   }
 });
 
