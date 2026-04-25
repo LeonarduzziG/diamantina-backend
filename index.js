@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-mercadopago.configure({ access_token: process.env.MP_ACCESS_TOKEN });
+mercadopago.configure({ access_token: process.env.ACCESS_TOKEN });
 
 const ANDREANI_USER = process.env.ANDREANI_USER;
 const ANDREANI_PASS = process.env.ANDREANI_PASS;
@@ -54,9 +54,9 @@ app.post("/crear-preferencia", async (req, res) => {
         currency_id: "ARS",
       })),
       back_urls: {
-        success: process.env.FRONTEND_URL + "?pago=aprobado",
-        failure: process.env.FRONTEND_URL + "?pago=fallido",
-        pending: process.env.FRONTEND_URL + "?pago=pendiente",
+        success: (process.env.FRONTEND_URL || "https://www.diamantina.shop") + "/?page=success",
+        failure: (process.env.FRONTEND_URL || "https://www.diamantina.shop") + "/?page=error",
+        pending: (process.env.FRONTEND_URL || "https://www.diamantina.shop") + "/?page=success",
       },
       auto_return: "approved",
       statement_descriptor: "DIAMANTINA",
