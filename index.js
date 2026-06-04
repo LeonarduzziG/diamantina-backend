@@ -66,6 +66,17 @@ async function bajarStock(prodId, talla, color, qty) {
     const nuevo = Math.max(0, actual - qty);
     await ref.set(nuevo);
     console.log(`Stock ${prodId} [${stockKey}]: ${actual} → ${nuevo}`);
+
+    // Check if ALL stock is 0 → set estado=agotado
+    if (nuevo === 0) {
+      const stockSnap = await db.ref(`productos/${prodId}/stock`).get();
+      const stockData = stockSnap.val() || {};
+      const totalStock = Object.values(stockData).reduce((s, v) => s + (Number(v) || 0), 0);
+      if (totalStock === 0) {
+        await db.ref(`productos/${prodId}/estado`).set("agotado");
+        console.log(`Producto ${prodId} marcado como agotado`);
+      }
+    }
   } catch (e) {
     console.error("Error bajando stock:", e.message);
   }
