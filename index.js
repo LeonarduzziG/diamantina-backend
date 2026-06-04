@@ -244,6 +244,20 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 });
 
+// ── BORRAR PEDIDO ───────────────────────────────────────────────────────────
+app.post("/borrar-pedido", async (req, res) => {
+  try {
+    const { key } = req.body;
+    if (!key || !db) return res.status(400).json({ error: "key requerida" });
+    await db.ref("pedidos/" + key).remove();
+    console.log("Pedido borrado:", key);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("Error borrando pedido:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── GUARDAR PEDIDO (desde frontend cuando no hay webhook) ───────────────────
 app.post("/guardar-pedido", async (req, res) => {
   try {
