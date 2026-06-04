@@ -244,6 +244,24 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 });
 
+// ── GUARDAR PEDIDO (desde frontend cuando no hay webhook) ───────────────────
+app.post("/guardar-pedido", async (req, res) => {
+  try {
+    const { pedido } = req.body;
+    if (!pedido || !db) return res.status(400).json({ error: "Pedido requerido" });
+    const ref = await db.ref("pedidos").push({
+      ...pedido,
+      estado: pedido.estado || "aprobado",
+      ts: pedido.ts || Date.now()
+    });
+    console.log("Pedido guardado via /guardar-pedido:", ref.key);
+    res.json({ ok: true, key: ref.key });
+  } catch (e) {
+    console.error("Error guardando pedido:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── BAJAR STOCK MANUAL (fallback desde frontend) ─────────────────────────────
 app.post("/bajar-stock", async (req, res) => {
   try {
