@@ -162,7 +162,7 @@ app.post("/crear-preferencia", async (req, res) => {
       },
       auto_return: "approved",
       statement_descriptor: "DIAMANTINA",
-      binary_mode: false,
+      binary_mode: true,
       payment_methods: { installments: 12 },
     };
     const response = await mercadopago.preferences.create(preference);
