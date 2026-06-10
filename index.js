@@ -340,20 +340,6 @@ app.get("/", (req, res) =>
     mp: process.env.ACCESS_TOKEN ? "configurado" : "NO configurado"
   })
 );
-//-------cotizar mercadoenvios
-app.post("/cotizar-envio", async (req, res) => {
-  try {
-    const { cpDestino, alto, ancho, largo, peso } = req.body;
-    const url = `https://api.mercadolibre.com/shipments/carrier_rates?zip_code_from=1748&zip_code_to=${cpDestino}&dimensions=${alto}x${ancho}x${largo},${Math.ceil(peso*1000)}`;
-    const r = await fetch(url, {
-      headers: { Authorization: `Bearer ${process.env.ACCESS_TOKEN}` }
-    });
-    const data = await r.json();
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.listen(process.env.PORT || 3000, () =>
   console.log("Diamantina Backend v2 corriendo")
