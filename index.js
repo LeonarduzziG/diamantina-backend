@@ -330,6 +330,70 @@ app.post("/andreani-cotizar", async (req, res) => {
   }
 });
 
+// ── PRODUCT PREVIEW (para WhatsApp/redes sociales) ──────────────────────────
+// Cuando WhatsApp escanea diamantina-backend.onrender.com/p/ID
+// devuelve HTML con meta tags del producto y redirige a la tienda
+app.get("/p/:id", async (req, res) => {
+  const id = req.params.id;
+  const TIENDA = process.env.FRONTEND_URL || "https://www.diamantina.shop";
+
+  try {
+    if (!db) throw new Error("DB no disponible");
+    const snap = await db.ref("productos/" + id).get();
+    const p = snap.val();
+
+    if (!p) {
+      return res.redirect(302, TIENDA + "/?producto=" + encodeURIComponent(id));
+    }
+
+    const nombre = p.name || "Diamantina Lencería";
+    const desc = (p.desc || "Lencería de diseño en Argentina")
+      .replace(/<[^>]+>/g, "")
+      .slice(0, 160);
+    const precio = p.precioFinal || p.price || 0;
+    const img = (p.imgs && p.imgs[0]) || p.img || 
+      "https://res.cloudinary.com/dy1yckjcj/image/upload/v1780442730/6011F3D2-4EA7-4B2B-A4C8-9F217ADD2F2B_lmotkd.png";
+    const url = TIENDA + "/?producto=" + encodeURIComponent(id);
+    const precioStr = precio ? " — $" + Number(precio).toLocaleString("es-AR") : "";
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${nombre} — Diamantina Lencería</title>
+  <meta name="description" content="${desc}${precioStr}">
+  
+  <!-- Open Graph / WhatsApp / Facebook -->
+  <meta property="og:type" content="product">
+  <meta property="og:title" content="${nombre} — Diamantina Lencería">
+  <meta property="og:description" content="${desc}${precioStr}">
+  <meta property="og:image" content="${img}">
+  <meta property="og:image:width" content="800">
+  <meta property="og:image:height" content="800">
+  <meta property="og:url" content="${url}">
+  <meta property="og:site_name" content="Diamantina Lencería">
+  
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${nombre} — Diamantina Lencería">
+  <meta name="twitter:description" content="${desc}${precioStr}">
+  <meta name="twitter:image" content="${img}">
+  
+  <!-- Redirect inmediato a la tienda -->
+  <meta http-equiv="refresh" content="0; url=${url}">
+  <link rel="canonical" href="${url}">
+</head>
+<body>
+  <p>Redirigiendo a <a href="${url}">${nombre}</a>...</p>
+  <script>window.location.replace("${url}");</script>
+</body>
+</html>`);
+  } catch (e) {
+    console.error("Error product preview:", e.message);
+    res.redirect(302, TIENDA + "/?producto=" + encodeURIComponent(id));
+  }
+});
+
 // ── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) =>
   res.json({
