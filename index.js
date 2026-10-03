@@ -25,6 +25,58 @@ try {
   console.error("Error iniciando Firebase Admin:", e.message);
 }
 
+// ── EMAILJS (notificación de pedidos por mail, enviada desde el servidor) ───
+// Así el mail sale SIEMPRE que el pago se confirma — no depende de que el
+// navegador del cliente vuelva a la web después de pagar.
+const EMAILJS_PUBLIC_KEY = process.env.EMAILJS_PUBLIC_KEY || "aIVvakD_ibBlrMGTF";
+const EMAILJS_PRIVATE_KEY = process.env.EMAILJS_PRIVATE_KEY || "";
+const EMAILJS_SERVICE_ID = "service_thw68fg";
+const EMAILJS_TEMPLATE_ID = "template_4tth7pc";
+
+async function enviarEmailPedido(pedido) {
+  if (!EMAILJS_PRIVATE_KEY) {
+    console.warn("EMAILJS_PRIVATE_KEY no configurada — no se puede enviar el mail desde el backend. Agregala en las variables de entorno.");
+    return false;
+  }
+  try {
+    const items = (pedido.items || []).map(i => {
+      const t = i.talla && i.talla !== "—" ? ` · Talle ${i.talla}` : "";
+      const colorVal = i.color && typeof i.color === "object" ? (i.color.nombre || i.color.hex || "") : (i.color || "");
+      const c = colorVal ? ` · ${colorVal}` : "";
+      return `${i.title || i.name || "—"}${t}${c} x${i.qty || 1}`;
+    }).join(" | ");
+    const templateParams = {
+      to_email: "gel340@gmail.com",
+      order_id: pedido.payment_id || String(Date.now()),
+      cliente: pedido.nombre || "Cliente",
+      telefono: pedido.telefono || "No especificado",
+      email_cliente: pedido.email || "No especificado",
+      direccion: pedido.direccion || "No especificada",
+      cp: pedido.cpDestino || "No especificado",
+      tipo_envio: pedido.tipoEnvio || "No especificado",
+      observaciones: pedido.observaciones || "Sin observaciones",
+      total: "$" + (Number(pedido.total) || 0).toLocaleString("es-AR"),
+      items,
+      estado: pedido.estado || "aprobado",
+      envio: pedido.envio || "Sin especificar",
+      payment_id: pedido.payment_id || "—",
+      fecha: new Date(pedido.ts || Date.now()).toLocaleString("es-AR")
+    };
+    await axios.post("https://api.emailjs.com/api/v1.0/email/send", {
+      service_id: EMAILJS_SERVICE_ID,
+      template_id: EMAILJS_TEMPLATE_ID,
+      user_id: EMAILJS_PUBLIC_KEY,
+      accessToken: EMAILJS_PRIVATE_KEY,
+      template_params: templateParams
+    }, { headers: { "Content-Type": "application/json" }, timeout: 8000 });
+    console.log("Email enviado desde el backend OK para pedido", pedido.payment_id);
+    return true;
+  } catch (e) {
+    console.error("Error enviando email desde el backend:", e?.response?.data || e.message);
+    return false;
+  }
+}
+
 // ── ANDREANI ─────────────────────────────────────────────────────────────────
 const ANDREANI_USER = process.env.ANDREANI_USER;
 const ANDREANI_PASS = process.env.ANDREANI_PASS;
@@ -130,6 +182,19 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // Protección anti-duplicados: si Mercado Pago reenvía la misma
+    // notificación (pasa seguido), no procesamos el mismo pago dos veces
+    // (evita bajar stock doble o mandar el mail dos veces).
+    if (db) {
+      const yaProcRef = db.ref("webhook_procesados/" + paymentId);
+      const yaProcSnap = await yaProcRef.get();
+      if (yaProcSnap.exists()) {
+        console.log("Pago", paymentId, "ya fue procesado antes, ignoro este webhook duplicado");
+        return res.sendStatus(200);
+      }
+      await yaProcRef.set({ ts: Date.now() });
+    }
+
     // Buscar pedido pendiente en Firebase por external_reference o payment_id
     const extRef = pago.external_reference;
     let pedidoPendiente = null;
@@ -148,40 +213,72 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
+    // Datos reales de los productos comprados (prodId/talla/color), guardados
+    // como metadata en la preferencia al crearla. Sirven de respaldo si por
+    // algún motivo no encontramos el pedido pendiente en Firebase (por ej.
+    // se borró, o el external_reference no coincidió).
+    let itemsDetalle = [];
+    try {
+      if (pago.metadata?.items_detalle) {
+        itemsDetalle = JSON.parse(pago.metadata.items_detalle);
+      }
+    } catch (e) { console.warn("No se pudo leer items_detalle de metadata:", e.message); }
+
+    let pedidoFinal;
+
     if (pedidoPendiente && pedidoKey) {
-      // Actualizar pedido existente
+      // Ya existía el pedido pendiente: lo marcamos aprobado y bajamos stock
+      if (pedidoPendiente.estado === "aprobado") {
+        console.log("Pedido", pedidoKey, "ya estaba aprobado, no lo proceso de nuevo");
+        return res.sendStatus(200);
+      }
       await actualizarPedido(pedidoKey, {
         estado: "aprobado",
         payment_id: String(paymentId)
       });
+      pedidoFinal = { ...pedidoPendiente, estado: "aprobado", payment_id: String(paymentId) };
 
-      // Bajar stock
-      const items = pedidoPendiente.items || [];
+      const items = (pedidoPendiente.items && pedidoPendiente.items.length ? pedidoPendiente.items : itemsDetalle) || [];
       for (const item of items) {
         if (item.prodId && item.talla) {
           await bajarStock(item.prodId, item.talla, item.color || "", item.qty || 1);
         }
       }
     } else {
-      // Crear pedido nuevo desde datos del webhook
-      const items = pago.additional_info?.items || [];
-      const pedidoNuevo = {
+      // No encontramos el pedido pendiente en Firebase: lo reconstruimos con
+      // los datos reales guardados en la metadata del pago, para no perder
+      // el detalle de talla/color y poder bajar el stock correcto.
+      console.warn("No encontré un pedido pendiente para external_reference:", extRef, "— reconstruyendo desde metadata");
+      const itemsFinales = itemsDetalle.length
+        ? itemsDetalle
+        : (pago.additional_info?.items || []).map(i => ({
+            name: i.title,
+            qty: Number(i.quantity) || 1,
+            price: Number(i.unit_price) || 0
+          }));
+      pedidoFinal = {
         payment_id: String(paymentId),
         external_reference: extRef || null,
         estado: "aprobado",
         total: pago.transaction_amount || 0,
         nombre: pago.payer?.first_name || "Cliente",
         email: pago.payer?.email || "",
-        items: items.map(i => ({
-          name: i.title,
-          qty: Number(i.quantity) || 1,
-          price: Number(i.unit_price) || 0
-        })),
+        items: itemsFinales,
         ts: Date.now(),
-        fuente: "webhook"
+        fuente: "webhook_sin_match"
       };
-      await guardarPedido(pedidoNuevo);
+      await guardarPedido(pedidoFinal);
+
+      for (const item of itemsFinales) {
+        if (item.prodId && item.talla) {
+          await bajarStock(item.prodId, item.talla, item.color || "", item.qty || 1);
+        }
+      }
     }
+
+    // Mandamos el mail desde el servidor: así llega siempre que el pago se
+    // confirma, sin depender de que el cliente vuelva a abrir la web.
+    await enviarEmailPedido(pedidoFinal);
 
     res.sendStatus(200);
   } catch (e) {
@@ -229,7 +326,23 @@ app.post("/crear-preferencia", async (req, res) => {
       binary_mode: true,
       payment_methods: { installments: 12 },
       external_reference: pedidoKey || String(Date.now()),
-      notification_url: "https://diamantina-backend.onrender.com/webhook"
+      notification_url: "https://diamantina-backend.onrender.com/webhook",
+      // Guardamos el detalle real de los productos (prodId/talla/color) en la
+      // metadata del pago. Es el respaldo que usa el webhook para bajar el
+      // stock correcto si por algún motivo no encuentra el pedido pendiente
+      // en Firebase (por ejemplo, si se borró o el external_reference no
+      // coincidió con nada).
+      metadata: {
+        pedido_key: pedidoKey || null,
+        items_detalle: JSON.stringify((pedido?.items || []).map(i => ({
+          prodId: i.prodId || i.id || null,
+          talla: i.talla || null,
+          color: i.color || null,
+          qty: i.qty || 1,
+          name: i.name || i.title || null,
+          price: i.price || null
+        })))
+      }
     };
 
     const response = await mercadopago.preferences.create(preference);
