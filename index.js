@@ -3,10 +3,31 @@ const mercadopago = require("mercadopago");
 const cors = require("cors");
 const axios = require("axios");
 const admin = require("firebase-admin");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
+app.set("trust proxy", 1); // Render está detrás de un proxy; necesario para que el rate limit lea la IP real
 app.use(cors());
 app.use(express.json());
+
+// ── RATE LIMITING ────────────────────────────────────────────────────────────
+// Limita cuántas veces se puede llamar a los endpoints sensibles desde una
+// misma IP, para que nadie pueda vaciar el stock o crear pedidos en masa con
+// un script. Los límites son holgados para no molestar a un cliente real.
+const limiteCompra = rateLimit({
+  windowMs: 60 * 1000,      // ventana de 1 minuto
+  max: 12,                  // hasta 12 intentos de compra/pedido por minuto por IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiados intentos. Esperá un momento y volvé a probar." }
+});
+const limiteStock = rateLimit({
+  windowMs: 60 * 1000,
+  max: 12,                  // hasta 12 llamadas de bajar-stock por minuto por IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiados intentos. Esperá un momento." }
+});
 
 // ── MERCADOPAGO ──────────────────────────────────────────────────────────────
 mercadopago.configure({ access_token: process.env.ACCESS_TOKEN });
@@ -287,10 +308,61 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ── VALIDACIÓN DE PRECIO (anti-fraude) ───────────────────────────────────────
+// Lee el precio real de cada producto desde Firebase y verifica que lo que
+// manda el navegador no sea sospechosamente bajo. No recalcula descuentos/
+// cupones/promos (eso lo hace el frontend), solo pone un piso razonable para
+// que nadie pueda pagar $1 por un producto de $45.000 editando la consola.
+// Si algún precio está por debajo del piso, rechaza toda la compra.
+const PISO_PORCENTAJE = 0.4; // el precio no puede ser < 40% del precio de lista
+
+async function validarPreciosItems(pedido) {
+  // pedido.items trae prodId, price (lo que cobra el front) y qty
+  if (!db || !pedido || !Array.isArray(pedido.items)) return { ok: true };
+  for (const item of pedido.items) {
+    const prodId = item.prodId || item.id;
+    if (!prodId) continue; // el envío u otros items sin prodId no se validan acá
+    const precioEnviado = Number(item.price) || 0;
+    try {
+      const snap = await db.ref("productos/" + prodId).get();
+      const p = snap.val();
+      if (!p) {
+        return { ok: false, motivo: `Producto ${prodId} no existe` };
+      }
+      // Precio de referencia: el con descuento si lo tiene, si no el de lista
+      const precioRef = Number(p.precioFinal) || Number(p.price) || 0;
+      if (precioRef <= 0) continue; // sin precio de referencia, no bloqueamos
+      // Para packs, el precio por unidad es packPrice/packQty
+      let piso = precioRef * PISO_PORCENTAJE;
+      if (p.packQty >= 2 && p.packPrice > 0) {
+        const unitPack = p.packPrice / p.packQty;
+        piso = Math.min(piso, unitPack * PISO_PORCENTAJE);
+      }
+      if (precioEnviado < piso) {
+        return {
+          ok: false,
+          motivo: `Precio inválido para "${p.name || prodId}": enviado $${precioEnviado}, mínimo permitido $${Math.round(piso)}`
+        };
+      }
+    } catch (e) {
+      console.error("Error validando precio de", prodId, e.message);
+      // Ante un error de lectura no bloqueamos la venta (fail-open), pero lo logueamos
+    }
+  }
+  return { ok: true };
+}
+
 // ── CREAR PREFERENCIA ────────────────────────────────────────────────────────
-app.post("/crear-preferencia", async (req, res) => {
+app.post("/crear-preferencia", limiteCompra, async (req, res) => {
   try {
     const { items, pedido } = req.body;
+
+    // Validar que nadie haya manipulado los precios desde el navegador
+    const validacion = await validarPreciosItems(pedido);
+    if (!validacion.ok) {
+      console.warn("Compra rechazada por precio sospechoso:", validacion.motivo);
+      return res.status(400).json({ error: "Precio inválido. Recargá la página e intentá de nuevo." });
+    }
 
     // Guardar pedido como pendiente antes de ir a MP
     let pedidoKey = null;
@@ -357,10 +429,19 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 });
 
-// ── BORRAR PEDIDO ───────────────────────────────────────────────────────────
+// ── BORRAR PEDIDO (protegido con clave de admin) ────────────────────────────
+// Requiere la clave secreta ADMIN_KEY (variable de entorno). Así nadie puede
+// borrar pedidos sin conocerla, aunque descubra la URL del backend.
+const ADMIN_KEY = process.env.ADMIN_KEY || "";
+
 app.post("/borrar-pedido", async (req, res) => {
   try {
-    const { key } = req.body;
+    const { key, adminKey } = req.body;
+    if (!ADMIN_KEY) return res.status(503).json({ error: "ADMIN_KEY no configurada en el servidor" });
+    if (adminKey !== ADMIN_KEY) {
+      console.warn("Intento de borrar pedido sin clave válida");
+      return res.status(403).json({ error: "No autorizado" });
+    }
     if (!key || !db) return res.status(400).json({ error: "key requerida" });
     await db.ref("pedidos/" + key).remove();
     console.log("Pedido borrado:", key);
@@ -372,7 +453,7 @@ app.post("/borrar-pedido", async (req, res) => {
 });
 
 // ── GUARDAR PEDIDO (desde frontend cuando no hay webhook) ───────────────────
-app.post("/guardar-pedido", async (req, res) => {
+app.post("/guardar-pedido", limiteCompra, async (req, res) => {
   try {
     const { pedido } = req.body;
     if (!pedido || !db) return res.status(400).json({ error: "Pedido requerido" });
@@ -390,7 +471,7 @@ app.post("/guardar-pedido", async (req, res) => {
 });
 
 // ── BAJAR STOCK MANUAL (fallback desde frontend) ─────────────────────────────
-app.post("/bajar-stock", async (req, res) => {
+app.post("/bajar-stock", limiteStock, async (req, res) => {
   try {
     const { items } = req.body;
     if (!items || !db) return res.json({ ok: true });
