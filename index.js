@@ -329,6 +329,23 @@ async function calcularTotales(pedido, metodo) {
     if (!(unit > 0)) throw new ErrorCliente(`"${p.name}" no tiene precio cargado.`);
 
     const color = (it.color && typeof it.color === "object") ? (it.color.nombre || it.color.hex || "") : (it.color || "");
+
+    // ── Validar stock disponible (evita vender más de lo que hay) ──
+    // Solo bloquea si el producto tiene mapa de stock cargado; si no, no limita
+    // (mismo criterio que el front). Para packs, qty ya viene en unidades.
+    if (p.stock && typeof p.stock === "object") {
+      const tallaRaw = txt(it.talla, 20) || "—";
+      const ck = color ? (safeKey(tallaRaw) + "__" + safeKey(color)) : safeKey(tallaRaw);
+      let disp;
+      if (p.stock[ck] !== undefined) disp = Number(p.stock[ck]);
+      else if (p.stock[tallaRaw] !== undefined) disp = Number(p.stock[tallaRaw]);
+      else if (p.stock[safeKey(tallaRaw)] !== undefined) disp = Number(p.stock[safeKey(tallaRaw)]);
+      if (disp !== undefined && !isNaN(disp) && qty > disp) {
+        if (disp <= 0) throw new ErrorCliente(`"${p.name}" se quedó sin stock. Sacalo del carrito para seguir.`);
+        throw new ErrorCliente(`"${p.name}" no tiene stock suficiente (quedan ${disp}). Bajá la cantidad en el carrito.`);
+      }
+    }
+
     const name = esPack ? `${p.name} (Pack x${packQty})` : p.name;
     items.push({
       prodId, name, title: name,
