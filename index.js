@@ -309,6 +309,7 @@ async function calcularTotales(pedido, metodo) {
 
   const items = [];
   let subtotal = 0;
+  const usados = {}; // acumula cantidades por bucket de stock (prodId|clave) entre líneas
   for (const it of itemsIn) {
     const prodId = txt(it.prodId || it.id, 60);
     const qty = Math.floor(Number(it.qty));
@@ -336,13 +337,19 @@ async function calcularTotales(pedido, metodo) {
     if (p.stock && typeof p.stock === "object") {
       const tallaRaw = txt(it.talla, 20) || "—";
       const ck = color ? (safeKey(tallaRaw) + "__" + safeKey(color)) : safeKey(tallaRaw);
-      let disp;
-      if (p.stock[ck] !== undefined) disp = Number(p.stock[ck]);
-      else if (p.stock[tallaRaw] !== undefined) disp = Number(p.stock[tallaRaw]);
-      else if (p.stock[safeKey(tallaRaw)] !== undefined) disp = Number(p.stock[safeKey(tallaRaw)]);
-      if (disp !== undefined && !isNaN(disp) && qty > disp) {
-        if (disp <= 0) throw new ErrorCliente(`"${p.name}" se quedó sin stock. Sacalo del carrito para seguir.`);
-        throw new ErrorCliente(`"${p.name}" no tiene stock suficiente (quedan ${disp}). Bajá la cantidad en el carrito.`);
+      let disp, bucketKey;
+      if (p.stock[ck] !== undefined) { disp = Number(p.stock[ck]); bucketKey = ck; }
+      else if (p.stock[tallaRaw] !== undefined) { disp = Number(p.stock[tallaRaw]); bucketKey = tallaRaw; }
+      else if (p.stock[safeKey(tallaRaw)] !== undefined) { disp = Number(p.stock[safeKey(tallaRaw)]); bucketKey = safeKey(tallaRaw); }
+      // Acumulamos por bucket: si el mismo producto/talle/color viene en varias
+      // líneas (ej. una unidad suelta + un pack), sumamos antes de comparar.
+      if (disp !== undefined && !isNaN(disp)) {
+        const clave = prodId + "|" + bucketKey;
+        usados[clave] = (usados[clave] || 0) + qty;
+        if (usados[clave] > disp) {
+          if (disp <= 0) throw new ErrorCliente(`"${p.name}" se quedó sin stock. Sacalo del carrito para seguir.`);
+          throw new ErrorCliente(`"${p.name}" no tiene stock suficiente (quedan ${disp}). Bajá la cantidad en el carrito.`);
+        }
       }
     }
 
