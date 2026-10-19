@@ -112,8 +112,17 @@ async function enviarEmailPedido(pedido) {
     const items = (pedido.items || []).map(i => {
       const t = i.talla && i.talla !== "—" ? ` · Talle ${i.talla}` : "";
       const c = i.color ? ` · ${i.color}` : "";
-      return `${i.title || i.name || "—"}${t}${c} x${i.qty || 1}`;
+      const rol = i.giftRol ? `[${i.giftRol}] ` : "";
+      return `${rol}${i.title || i.name || "—"}${t}${c} x${i.qty || 1}`;
     }).join(" | ");
+    // Caja de regalo: marcar el pedido y sumar la dedicatoria a las observaciones
+    const esCajaRegalo = (pedido.items || []).some(i => i.giftRol);
+    const dedicatoria = (pedido.items || []).map(i => i.giftNota).find(Boolean) || "";
+    const observacionesFull = [
+      pedido.observaciones || "",
+      esCajaRegalo ? "🎁 CAJA DE REGALO" : "",
+      dedicatoria ? `Dedicatoria: "${dedicatoria}"` : ""
+    ].filter(Boolean).join(" | ") || "Sin observaciones";
     const templateParams = {
       to_email: EMAIL_AVISOS,
       order_id: pedido.payment_id || String(Date.now()),
@@ -123,7 +132,7 @@ async function enviarEmailPedido(pedido) {
       direccion: pedido.direccion || "No especificada",
       cp: pedido.cpDestino || "No especificado",
       tipo_envio: pedido.tipoEnvio || "No especificado",
-      observaciones: pedido.observaciones || "Sin observaciones",
+      observaciones: observacionesFull,
       total: "$" + (Number(pedido.total) || 0).toLocaleString("es-AR"),
       items,
       estado: pedido.estado || "aprobado",
@@ -354,12 +363,18 @@ async function calcularTotales(pedido, metodo) {
     }
 
     const name = esPack ? `${p.name} (Pack x${packQty})` : p.name;
+    // Preservar datos de "caja de regalo" si el ítem los trae (no afectan el precio)
+    const giftExtra = {};
+    if (it.giftBoxId) giftExtra.giftBoxId = txt(it.giftBoxId, 40);
+    if (it.giftRol) giftExtra.giftRol = txt(it.giftRol, 20);
+    if (it.giftNota) giftExtra.giftNota = txt(it.giftNota, 200);
     items.push({
       prodId, name, title: name,
       cat: p.cat || "",
       talla: txt(it.talla, 20) || "—",
       color: txt(color, 40) || "",
-      qty, price: unit
+      qty, price: unit,
+      ...giftExtra
     });
     subtotal += unit * qty;
   }
