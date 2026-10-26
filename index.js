@@ -837,10 +837,12 @@ app.get("/", (req, res) =>
     andreani: ANDREANI_SANDBOX ? "sandbox" : "producción",
     correo: CORREO_BASE.includes("apitest") ? "sandbox" : "producción",
     mp: process.env.ACCESS_TOKEN ? "configurado" : "NO configurado",
-    email: EMAILJS_PRIVATE_KEY ? "configurado" : "NO configurado"
+    email: EMAILJS_PRIVATE_KEY ? "configurado" : "NO configurado",
+    correo_cred: (CORREO_USER && CORREO_PASS) ? "configurado" : "NO configurado",
+    correo_customer: CORREO_CUSTOMER_ID ? "configurado" : "NO configurado"
   })
 );
 
 app.listen(process.env.PORT || 3000, () =>
-  console.log("Diamantina Backend v3 corriendo")
+  console.log("Diamantina Backend v4 corriendo")
 );
