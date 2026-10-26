@@ -852,30 +852,6 @@ app.get("/p/:id", async (req, res) => {
   }
 });
 
-// ── DIAGNÓSTICO TEMPORAL CORREO (borrar después de probar) ───────────────────
-// Abrí en el navegador: https://diamantina-backend.onrender.com/correo-test?cp=1879
-app.get("/correo-test", async (req, res) => {
-  const cp = String(req.query.cp || "1879").trim();
-  let paso = "token", token = null;
-  try {
-    token = await getCorreoToken();
-    paso = "resolverCustomerId";
-    const customerId = await resolverCustomerId();
-    paso = "rates";
-    const r = await axios.post(
-      `${CORREO_BASE}/rates`,
-      { customerId, postalCodeOrigin: CORREO_CP_ORIGEN, postalCodeDestination: cp,
-        dimensions: { weight: 500, height: 8, width: 15, length: 20 } },
-      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 10000 }
-    );
-    res.json({ ok: true, customerIdUsado: customerId, cpOrigen: CORREO_CP_ORIGEN, respuesta: r.data });
-  } catch (e) {
-    res.json({ ok: false, pasoQueFallo: paso, status: e?.response?.status || null,
-      error: e?.response?.data || e.message,
-      customerIdUsado: CORREO_CUSTOMER_ID || "(vacío)", cpOrigen: CORREO_CP_ORIGEN });
-  }
-});
-
 // ── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) =>
   res.json({
@@ -895,3 +871,17 @@ app.get("/", (req, res) =>
 app.listen(process.env.PORT || 3000, () =>
   console.log("Diamantina Backend v4 corriendo")
 );
+
+// ── KEEP-ALIVE ───────────────────────────────────────────────────────────────
+// El plan gratis de Render duerme el servicio tras ~15 min sin tráfico, y la
+// primera cotización después tarda ~50s (el carrito cae a la estimación).
+// Este auto-ping cada 10 min lo mantiene despierto para que siempre cotice real.
+// Se puede desactivar poniendo la variable KEEP_ALIVE=false.
+if (process.env.KEEP_ALIVE !== "false") {
+  const SELF_URL = (process.env.BACKEND_URL || "https://diamantina-backend.onrender.com").replace(/\/+$/, "");
+  setInterval(() => {
+    axios.get(SELF_URL + "/", { timeout: 8000 })
+      .then(() => console.log("keep-alive ok"))
+      .catch(e => console.warn("keep-alive falló:", e.message));
+  }, 10 * 60 * 1000);
+}
