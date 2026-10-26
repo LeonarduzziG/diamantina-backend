@@ -158,9 +158,12 @@ async function enviarEmailPedido(pedido) {
 // ── CORREO ARGENTINO ─────────────────────────────────────────────────────────
 // Credenciales via env vars; los valores son el fallback de desarrollo —
 // en Render siempre usar las variables de entorno para no exponerlos.
-const CORREO_USER = process.env.CORREO_USER || "";
-const CORREO_PASS = process.env.CORREO_PASS || "";
-const CORREO_CUSTOMER_ID = process.env.CORREO_CUSTOMER_ID || ""; // número de cliente MiCorreo (ej: 0000550137)
+const CORREO_USER = process.env.CORREO_USER || "";   // usuario de API (para /token)
+const CORREO_PASS = process.env.CORREO_PASS || "";   // contraseña de API (para /token)
+const CORREO_CUSTOMER_ID = process.env.CORREO_CUSTOMER_ID || ""; // número de cliente MiCorreo (ej: 0000550137), opcional
+// Cuenta MiCorreo (email habilitado para la API) — se usa para resolver el número de cliente solo
+const CORREO_EMAIL = process.env.CORREO_EMAIL || "";
+const CORREO_EMAIL_PASS = process.env.CORREO_EMAIL_PASS || "";
 const CORREO_CP_ORIGEN = process.env.CORREO_CP_ORIGEN || "1712";
 // Usar ambiente productivo (el PDF confirma que las credenciales sirven para ambos)
 const CORREO_BASE = process.env.CORREO_SANDBOX === "true"
@@ -170,6 +173,27 @@ const CORREO_BASE = process.env.CORREO_SANDBOX === "true"
 let _correoToken = null;
 let _correoTokenTs = 0;
 let _correoCustomerId = null; // se obtiene al hacer login
+let _correoCustomerIdResuelto = null; // número resuelto vía /users/validate
+
+// Devuelve el NÚMERO de cliente MiCorreo que /rates necesita.
+// Si CORREO_CUSTOMER_ID es numérico lo usa; si no, lo busca con /users/validate
+// (usando el email y la contraseña de la cuenta MiCorreo).
+async function resolverCustomerId() {
+  if (CORREO_CUSTOMER_ID && /^\d+$/.test(String(CORREO_CUSTOMER_ID).trim())) {
+    return String(CORREO_CUSTOMER_ID).trim();
+  }
+  if (_correoCustomerIdResuelto) return _correoCustomerIdResuelto;
+  const email = CORREO_EMAIL || CORREO_USER;
+  const pass  = CORREO_EMAIL_PASS || CORREO_PASS;
+  const token = await getCorreoToken();
+  const r = await axios.post(
+    `${CORREO_BASE}/users/validate`,
+    { email, password: pass },
+    { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 8000 }
+  );
+  _correoCustomerIdResuelto = r.data && r.data.customerId;
+  return _correoCustomerIdResuelto;
+}
 
 async function getCorreoToken() {
   const ahora = Date.now();
@@ -731,7 +755,7 @@ app.post("/correo-cotizar", limiteCompra, async (req, res) => {
     }
 
     const token      = await getCorreoToken();
-    const customerId = CORREO_CUSTOMER_ID || _correoCustomerId || CORREO_USER;
+    const customerId = await resolverCustomerId();
 
     // Omitimos deliveredType: la API devuelve en "rates" las dos modalidades
     // (D = domicilio, S = sucursal) en un solo request.
@@ -835,8 +859,9 @@ app.get("/correo-test", async (req, res) => {
   let paso = "token", token = null;
   try {
     token = await getCorreoToken();
+    paso = "resolverCustomerId";
+    const customerId = await resolverCustomerId();
     paso = "rates";
-    const customerId = CORREO_CUSTOMER_ID || _correoCustomerId || CORREO_USER;
     const r = await axios.post(
       `${CORREO_BASE}/rates`,
       { customerId, postalCodeOrigin: CORREO_CP_ORIGEN, postalCodeDestination: cp,
@@ -862,7 +887,8 @@ app.get("/", (req, res) =>
     mp: process.env.ACCESS_TOKEN ? "configurado" : "NO configurado",
     email: EMAILJS_PRIVATE_KEY ? "configurado" : "NO configurado",
     correo_cred: (CORREO_USER && CORREO_PASS) ? "configurado" : "NO configurado",
-    correo_customer: CORREO_CUSTOMER_ID ? "configurado" : "NO configurado"
+    correo_customer: CORREO_CUSTOMER_ID ? "configurado" : "NO configurado",
+    correo_email: (CORREO_EMAIL || CORREO_USER) ? ((CORREO_EMAIL_PASS || CORREO_PASS) ? "configurado" : "falta contraseña") : "NO configurado"
   })
 );
 
