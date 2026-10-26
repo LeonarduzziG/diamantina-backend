@@ -155,6 +155,43 @@ async function enviarEmailPedido(pedido) {
   }
 }
 
+// ── CORREO ARGENTINO ─────────────────────────────────────────────────────────
+// Credenciales via env vars; los valores son el fallback de desarrollo —
+// en Render siempre usar las variables de entorno para no exponerlos.
+const CORREO_USER = process.env.CORREO_USER || "";
+const CORREO_PASS = process.env.CORREO_PASS || "";
+const CORREO_CUSTOMER_ID = process.env.CORREO_CUSTOMER_ID || ""; // número de cliente MiCorreo (ej: 0000550137)
+const CORREO_CP_ORIGEN = process.env.CORREO_CP_ORIGEN || "1712";
+// Usar ambiente productivo (el PDF confirma que las credenciales sirven para ambos)
+const CORREO_BASE = process.env.CORREO_SANDBOX === "true"
+  ? "https://apitest.correoargentino.com.ar/micorreo/v1"
+  : "https://api.correoargentino.com.ar/micorreo/v1";
+
+let _correoToken = null;
+let _correoTokenTs = 0;
+let _correoCustomerId = null; // se obtiene al hacer login
+
+async function getCorreoToken() {
+  const ahora = Date.now();
+  // El JWT de Correo dura ~24h; refrescamos antes de las 23h para evitar expiración
+  if (_correoToken && ahora - _correoTokenTs < 23 * 60 * 60 * 1000) {
+    return _correoToken;
+  }
+  const res = await axios.post(
+    `${CORREO_BASE}/token`,
+    {},
+    {
+      auth: { username: CORREO_USER, password: CORREO_PASS },
+      timeout: 8000
+    }
+  );
+  _correoToken = res.data.token;
+  _correoTokenTs = ahora;
+  // La respuesta también devuelve el customerId que necesita /rates
+  if (res.data.customerId) _correoCustomerId = res.data.customerId;
+  return _correoToken;
+}
+
 // ── ANDREANI ─────────────────────────────────────────────────────────────────
 const ANDREANI_USER = process.env.ANDREANI_USER;
 const ANDREANI_PASS = process.env.ANDREANI_PASS;
@@ -661,6 +698,86 @@ app.post("/andreani-cotizar", limiteCompra, async (req, res) => {
   }
 });
 
+// ── CORREO ARGENTINO COTIZAR ──────────────────────────────────────────────────
+// Acepta { cpDestino, peso?, largo?, ancho?, alto? } y devuelve las opciones
+// Clásico y Expreso con precio en ARS, o un error si la API no responde.
+app.post("/correo-cotizar", limiteCompra, async (req, res) => {
+  try {
+    if (!CORREO_USER || !CORREO_PASS) {
+      return res.status(503).json({ error: "Credenciales Correo no configuradas" });
+    }
+    const {
+      cpDestino,
+      peso  = 500,   // gramos — un típico paquete de lencería
+      largo = 20,    // cm
+      ancho = 15,    // cm
+      alto  = 8      // cm
+    } = req.body || {};
+
+    if (!cpDestino) return res.status(400).json({ error: "cpDestino requerido" });
+
+    // Validación básica: CP argentino = 4 dígitos
+    const cp = String(cpDestino).trim();
+    if (!/^\d{4}$/.test(cp)) return res.status(400).json({ error: "cpDestino debe ser un código postal de 4 dígitos" });
+
+    // Validar dimensiones dentro de los límites del API (máx 50 000g / 200cm)
+    const pesoG    = Math.min(Math.max(Number(peso)  || 500,    1), 50000);
+    const largoC   = Math.min(Math.max(Number(largo) || 20,     1), 200);
+    const anchoC   = Math.min(Math.max(Number(ancho) || 15,     1), 200);
+    const altoC    = Math.min(Math.max(Number(alto)  || 8,      1), 200);
+    const sumaLados = largoC + anchoC + altoC;
+    if (sumaLados > 300) {
+      return res.status(400).json({ error: "Las dimensiones superan el máximo de 300 cm de suma de lados" });
+    }
+
+    const token      = await getCorreoToken();
+    const customerId = CORREO_CUSTOMER_ID || _correoCustomerId || CORREO_USER;
+
+    // Omitimos deliveredType: la API devuelve en "rates" las dos modalidades
+    // (D = domicilio, S = sucursal) en un solo request.
+    const cotizacion = await axios.post(
+      `${CORREO_BASE}/rates`,
+      {
+        customerId,
+        postalCodeOrigin:      CORREO_CP_ORIGEN,
+        postalCodeDestination: cp,
+        dimensions: { weight: pesoG, height: altoC, width: anchoC, length: largoC }
+      },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 10000 }
+    );
+
+    // La respuesta real es { rates: [{ deliveredType, productName, price, deliveryTimeMin, deliveryTimeMax }] }
+    const rates = (cotizacion.data && Array.isArray(cotizacion.data.rates)) ? cotizacion.data.rates : [];
+    const resultado = rates.map(r => {
+      const precio = Math.round(Number(r.price) || 0);
+      const dMin = r.deliveryTimeMin, dMax = r.deliveryTimeMax;
+      const plazo = (dMin && dMax) ? `${dMin}–${dMax} días hábiles` : (dMax ? `${dMax} días hábiles` : null);
+      return {
+        nombre: r.productName || "Correo Argentino",
+        precio,
+        plazo,
+        tipo: r.deliveredType === "S" ? "sucursal" : "domicilio"
+      };
+    }).filter(o => o.precio > 0);
+
+    if (!resultado.length) {
+      return res.status(404).json({ error: "No se obtuvieron tarifas para ese código postal" });
+    }
+    resultado.sort((a, b) => a.precio - b.precio);
+    res.json({ opciones: resultado });
+
+  } catch (err) {
+    // Si el token expiró antes de las 23h (edge case), limpiarlo para que el próximo
+    // request lo regenere
+    if (err?.response?.status === 401) {
+      _correoToken = null;
+      _correoTokenTs = 0;
+    }
+    console.error("Correo Argentino error:", err?.response?.data || err.message);
+    res.status(500).json({ error: "No se pudo cotizar con Correo Argentino" });
+  }
+});
+
 // ── PRODUCT PREVIEW (para WhatsApp/redes sociales) ──────────────────────────
 app.get("/p/:id", async (req, res) => {
   const id = req.params.id;
@@ -715,9 +832,10 @@ app.get("/p/:id", async (req, res) => {
 app.get("/", (req, res) =>
   res.json({
     status: "OK",
-    service: "Diamantina Backend v3",
+    service: "Diamantina Backend v4",
     firebase: db ? "conectado" : "NO conectado",
     andreani: ANDREANI_SANDBOX ? "sandbox" : "producción",
+    correo: CORREO_BASE.includes("apitest") ? "sandbox" : "producción",
     mp: process.env.ACCESS_TOKEN ? "configurado" : "NO configurado",
     email: EMAILJS_PRIVATE_KEY ? "configurado" : "NO configurado"
   })
