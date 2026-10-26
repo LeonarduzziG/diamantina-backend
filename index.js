@@ -828,6 +828,29 @@ app.get("/p/:id", async (req, res) => {
   }
 });
 
+// ── DIAGNÓSTICO TEMPORAL CORREO (borrar después de probar) ───────────────────
+// Abrí en el navegador: https://diamantina-backend.onrender.com/correo-test?cp=1879
+app.get("/correo-test", async (req, res) => {
+  const cp = String(req.query.cp || "1879").trim();
+  let paso = "token", token = null;
+  try {
+    token = await getCorreoToken();
+    paso = "rates";
+    const customerId = CORREO_CUSTOMER_ID || _correoCustomerId || CORREO_USER;
+    const r = await axios.post(
+      `${CORREO_BASE}/rates`,
+      { customerId, postalCodeOrigin: CORREO_CP_ORIGEN, postalCodeDestination: cp,
+        dimensions: { weight: 500, height: 8, width: 15, length: 20 } },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 10000 }
+    );
+    res.json({ ok: true, customerIdUsado: customerId, cpOrigen: CORREO_CP_ORIGEN, respuesta: r.data });
+  } catch (e) {
+    res.json({ ok: false, pasoQueFallo: paso, status: e?.response?.status || null,
+      error: e?.response?.data || e.message,
+      customerIdUsado: CORREO_CUSTOMER_ID || "(vacío)", cpOrigen: CORREO_CP_ORIGEN });
+  }
+});
+
 // ── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) =>
   res.json({
